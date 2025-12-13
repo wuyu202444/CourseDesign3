@@ -31,6 +31,7 @@
 #include "bsp_seg.h"
 #include "bsp_lm75.h"
 #include "bsp_adc.h"
+#include "app_types.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -156,7 +157,7 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the queue(s) */
   /* creation of q_SensorData */
-  q_SensorDataHandle = osMessageQueueNew (4, sizeof(uint16_t), &q_SensorData_attributes);
+  q_SensorDataHandle = osMessageQueueNew (4, 16, &q_SensorData_attributes);
 
   /* creation of q_KeyEvt */
   q_KeyEvtHandle = osMessageQueueNew (4, sizeof(uint16_t), &q_KeyEvt_attributes);
@@ -250,10 +251,52 @@ void StartDefaultTask(void *argument)
 void StartSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartSensorTask */
-  /* Infinite loop */
+
+  // 局部变量定义
+  SensorData_t current_data;
+  osStatus_t status;
+
+  // 任务循环
   for(;;)
   {
-    osDelay(1);
+    // ===========================
+    // 1. 获取数据 (Acquire)
+    // ===========================
+
+    // 读取 LM75 温度
+    current_data.temp_celsius = BSP_LM75_ReadTemp();
+
+    // 读取 ADC (直接从 DMA 缓冲区获取，无延迟)
+    current_data.adc_raw = BSP_ADC_GetRaw();
+
+    // 读取频率 (目前预留，赋值为 0)
+    current_data.freq_hz = 0;
+
+    // ===========================
+    // 2. 发送队列 (Queue Send)
+    // ===========================
+
+    // 将结构体发送到队列 q_SensorData
+    // 参数说明: 句柄, 数据指针, 优先级(0), 超时时间(0 - 不等待)
+    status = osMessageQueuePut(q_SensorDataHandle, &current_data, 0, 0);
+
+    // ===========================
+    // 3. 调试打印 (Debug Print)
+    // ===========================
+
+    // 打印当前读数和队列发送状态 (OK=0)
+    // 注意: 在高频中断或极度繁忙系统中 printf 可能会阻塞，调试完可注释掉
+    printf("[Sensor] T:%.1f C, ADC:%d, Q_St:%d\r\n",
+           current_data.temp_celsius,
+           current_data.adc_raw,
+           status);
+
+    // ===========================
+    // 4. 任务调度 (Delay)
+    // ===========================
+
+    // 延时 200ms，控制采样率，释放 CPU 给 DisplayTask 和其他任务
+    osDelay(200);
   }
   /* USER CODE END StartSensorTask */
 }
