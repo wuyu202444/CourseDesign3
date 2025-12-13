@@ -44,7 +44,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define ALARM_TEMP_HIGH   (1 << 0)  // 温度过高
+#define ALARM_VOLT_HIGH   (1 << 1)  // 电压过高
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -54,7 +55,9 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-
+// 全局传感器数据副本 (公告板)
+// SensorTask 写，LogicTask 读
+SensorData_t g_LatestSensorData = {0};
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -277,6 +280,10 @@ void StartSensorTask(void *argument)
     // 读取频率 (目前预留，赋值为 0)
     current_data.freq_hz = 0;
 
+    // >>>>> [新增] 更新全局副本，供 LogicTask 使用 <<<<<
+    g_LatestSensorData = current_data;
+    // >>>>> [结束] <<<<<
+
     // ===========================
     // 2. 发送队列 (Queue Send)
     // ===========================
@@ -319,7 +326,35 @@ void StartLogicTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    // ==========================================
+    // 1. 温度报警逻辑 (> 30.0 度)
+    // ==========================================
+    if (g_LatestSensorData.temp_celsius > 31.0f)
+    {
+      // 触发：设置标志位
+      osEventFlagsSet(evt_AlarmHandle, ALARM_TEMP_HIGH);
+    }
+    else
+    {
+      // 恢复：清除标志位
+      osEventFlagsClear(evt_AlarmHandle, ALARM_TEMP_HIGH);
+    }
+
+    // ==========================================
+    // 2. 电压报警逻辑 (> 2.5V, 即 ADC > 3103)
+    // ==========================================
+    // 3.3V * (1861/4095) ≈ 1.5V
+    if (g_LatestSensorData.adc_raw > 1861)
+    {
+      osEventFlagsSet(evt_AlarmHandle, ALARM_VOLT_HIGH);
+    }
+    else
+    {
+      osEventFlagsClear(evt_AlarmHandle, ALARM_VOLT_HIGH);
+    }
+
+    // 逻辑处理频率不用太高，10Hz 足够
+    osDelay(100);
   }
   /* USER CODE END StartLogicTask */
 }
@@ -383,10 +418,51 @@ void StartDisplayTask(void *argument)
 void StartAlarmTask(void *argument)
 {
   /* USER CODE BEGIN StartAlarmTask */
+
+  uint32_t flags;
+
+  BSP_Buzzer_Off();
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    // 1. 等待报警事件
+    // 如果无报警，这里会阻塞等待 100ms
+    // 如果有报警，这里会立即返回
+    flags = osEventFlagsWait(evt_AlarmHandle,
+                             ALARM_TEMP_HIGH | ALARM_VOLT_HIGH,
+                             osFlagsWaitAny | osFlagsNoClear,
+                             100);
+
+    if (flags > 0 && flags != osFlagsErrorTimeout)
+    {
+      // === 报警状态 (必须包含 osDelay) ===
+
+      // 阶段 1: 响
+      if (flags & ALARM_TEMP_HIGH) {
+        BSP_Buzzer_SetTone(2000, 2); // 高温：高频，大声
+      } else {
+        BSP_Buzzer_SetTone(1000, 1);  // 电压：低频，小声
+      }
+
+      // 【关键点】: 延时 100ms
+      // 这段时间 AlarmTask 进入阻塞态，CPU 交给 LogicTask 和 DisplayTask
+      osDelay(100);
+
+      // 阶段 2: 停 (制造滴-滴-滴的效果)
+      BSP_Buzzer_Off();
+
+      // 【关键点】: 再次延时 100ms
+      // 调节这个时间和上面的时间，可以改变报警的节奏 (急促或缓慢)
+      osDelay(100);
+    }
+    else
+    {
+      // === 无报警状态 ===
+      BSP_Buzzer_Off();
+      // 这里不需要额外的 delay，因为开头的 osEventFlagsWait 带了 100ms 超时
+      // 当没有标志位时，它自动就是阻塞的
+    }
   }
   /* USER CODE END StartAlarmTask */
 }
