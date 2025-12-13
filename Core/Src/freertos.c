@@ -209,6 +209,8 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
   OLED_Init();
+  OLED_Clear();
+  OLED_Refresh();
 
   printf("System Starting...\r\n");
 
@@ -296,7 +298,7 @@ void StartSensorTask(void *argument)
     // ===========================
 
     // 延时 200ms，控制采样率，释放 CPU 给 DisplayTask 和其他任务
-    osDelay(200);
+    osDelay(1000);
   }
   /* USER CODE END StartSensorTask */
 }
@@ -329,10 +331,41 @@ void StartLogicTask(void *argument)
 void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
+  SensorData_t recv_data;
+  osStatus_t status;
+  char str_buf[32]; // 用于格式化字符串
   /* Infinite loop */
   for(;;)
   {
-    OLED_Windows();
+    // ===========================
+    // 1. 尝试从队列获取数据
+    // ===========================
+    // 参数: 队列句柄, 数据接收缓冲指针, 优先级(NULL), 等待时间(0 - 不等待，直接刷新)
+    // 这里的策略是：如果有新数据就更新显示，没数据就保持原样
+    status = osMessageQueueGet(q_SensorDataHandle, &recv_data, NULL, 0);
+    if (status == osOK)
+    {
+      // ===========================
+      // 2. 如果获取成功，更新 OLED
+      // ===========================
+
+      // 显示温度
+      // 假设 OLED_ShowString 和 ShowNum 是您 BSP 里的函数，这里用通用逻辑演示
+      // 建议使用 sprintf 格式化字符串然后一次性显示，更灵活
+      sprintf(str_buf, "T: %.1f C  ", recv_data.temp_celsius);
+      OLED_ShowString(0, 0, (uint8_t *)str_buf, 16, 1); // 假设字体大小16
+
+      // 显示 ADC 电压
+      // 先转换成电压值: raw * 3.3 / 4095
+      float voltage = recv_data.adc_raw * 3.3f / 4095.0f;
+      sprintf(str_buf, "V: %.2f V  ", voltage);
+      OLED_ShowString(0, 16, (uint8_t *)str_buf, 16, 1); // 第2行
+
+      // 调试打印：确认接收端也收到了
+      printf("[Disp] Recv OK! T:%.1f\r\n", recv_data.temp_celsius);
+    }
+    OLED_Refresh();
+    osDelay(50);
   }
   /* USER CODE END StartDisplayTask */
 }
