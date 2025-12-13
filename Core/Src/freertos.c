@@ -27,10 +27,13 @@
 /* USER CODE BEGIN Includes */
 #include "iwdg.h"
 #include "stdio.h"
+
 #include "bsp_oled.h"
 #include "bsp_seg.h"
 #include "bsp_lm75.h"
 #include "bsp_adc.h"
+#include "bsp_buzzer.h"
+
 #include "app_types.h"
 /* USER CODE END Includes */
 
