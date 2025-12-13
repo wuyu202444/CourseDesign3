@@ -50,6 +50,27 @@
 /* USER CODE BEGIN PD */
 #define ALARM_TEMP_HIGH   (1 << 0)  // 温度过高
 #define ALARM_VOLT_HIGH   (1 << 1)  // 电压过高
+
+
+// ================= RGB 呼吸灯配置 =================
+
+// 1. 最大亮度 (0-255)
+// 如果觉得 LED 太刺眼，可以把这个改小，比如 100
+#define RGB_BREATH_MAX_BRIGHTNESS  30
+
+// 2. 呼吸步长 (每次增加的数值)
+// 数值越大，呼吸越急促；数值越小，呼吸越平缓
+#define RGB_BREATH_STEP            1
+
+// 3. 呼吸刷新周期 (ms)
+// 决定动画的流畅度，建议 20-50ms
+#define RGB_BREATH_REFRESH_MS      40
+
+// ================= RGB 报警闪烁配置 =================
+
+// 4. 报警闪烁周期 (ms)
+// 100ms 代表 100ms亮 -> 100ms灭 (即 5Hz 闪烁)
+#define RGB_BLINK_PERIOD_MS        100
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -107,6 +128,13 @@ const osThreadAttr_t KeepAlive_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for RGBTask */
+osThreadId_t RGBTaskHandle;
+const osThreadAttr_t RGBTask_attributes = {
+  .name = "RGBTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for q_SensorData */
 osMessageQueueId_t q_SensorDataHandle;
 const osMessageQueueAttr_t q_SensorData_attributes = {
@@ -144,6 +172,7 @@ void StartLogicTask(void *argument);
 void StartDisplayTask(void *argument);
 void StartAlarmTask(void *argument);
 void StartKeepAlive(void *argument);
+void StartRGBTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -204,6 +233,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of KeepAlive */
   KeepAliveHandle = osThreadNew(StartKeepAlive, NULL, &KeepAlive_attributes);
+
+  /* creation of RGBTask */
+  RGBTaskHandle = osThreadNew(StartRGBTask, NULL, &RGBTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -350,6 +382,12 @@ void StartLogicTask(void *argument)
   bool is_muted = false;       // 静音标志位
   bool alarm_condition = false; // 报警条件汇总
 
+  // [新增] 记录上一次的报警状态，用于检测状态跳变
+  bool last_alarm_status = false;
+
+  // 上电默认发送一次“绿色呼吸”
+  BSP_RGB_SendCmd(RGB_MODE_BREATHING, 0, 255, 0, 0);
+
   /* Infinite loop */
   for(;;)
   {
@@ -387,6 +425,33 @@ void StartLogicTask(void *argument)
     bool volt_high = (g_LatestSensorData.adc_raw > 1861);
 
     alarm_condition = temp_high | volt_high;
+
+    // ==========================================
+    // [新增] RGB 状态机控制逻辑
+    // ==========================================
+
+    // 只有当状态发生改变时 (Edge Detection)，才发送队列指令
+    // 这样避免每 100ms 都塞满队列
+    if (alarm_condition != last_alarm_status)
+    {
+      if (alarm_condition == true)
+      {
+        // --- 状态变更为：报警 ---
+        // 发送红色 (255, 0, 0) 闪烁
+        printf("[Logic] Alarm! RGB -> Red Blink\r\n");
+        BSP_RGB_SendCmd(RGB_MODE_BLINK, 30, 0, 0, 0);
+      }
+      else
+      {
+        // --- 状态变更为：正常 ---
+        // 发送绿色 (0, 255, 0) 呼吸
+        printf("[Logic] Normal. RGB -> Green Breath\r\n");
+        BSP_RGB_SendCmd(RGB_MODE_BREATHING, 0, 255, 0, 0);
+      }
+
+      // 更新历史状态
+      last_alarm_status = alarm_condition;
+    }
 
     if (alarm_condition)
     {
@@ -579,6 +644,124 @@ void StartKeepAlive(void *argument)
     osDelay(1000);
   }
   /* USER CODE END StartKeepAlive */
+}
+
+/* USER CODE BEGIN Header_StartRGBTask */
+/**
+* @brief Function implementing the RGBTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartRGBTask */
+void StartRGBTask(void *argument)
+{
+  /* USER CODE BEGIN StartRGBTask */
+
+  BSP_RGB_Init();
+
+  // 默认状态变量
+  RGBCmd_t current_cmd = {0};
+
+  // 初始默认：绿色呼吸
+  current_cmd.mode = RGB_MODE_BREATHING;
+  current_cmd.R = 0;
+  current_cmd.G = 255; // 这里设置255，实际显示亮度会由呼吸算法缩放到 0~30
+  current_cmd.B = 0;
+
+  // 动画控制变量
+  int16_t breath_val = 0;
+  // 初始化步长方向
+  int8_t  breath_dir = RGB_BREATH_STEP;
+  uint8_t blink_state = 0;
+
+  for(;;)
+  {
+    RGBCmd_t new_cmd;
+
+    // 尝试获取新指令 (0等待，非阻塞)
+    if (osMessageQueueGet(q_RGBCmdHandle, &new_cmd, NULL, 0) == osOK)
+    {
+       current_cmd = new_cmd;
+
+       // 重置动画状态，确保切换顺滑
+       breath_val = 0;
+       blink_state = 0;
+       breath_dir = RGB_BREATH_STEP; // 重置为变亮方向
+
+       // 切换瞬间先灭灯，清除残影
+       BSP_RGB_Set(0, 0, 0, 0);
+       BSP_RGB_Show();
+    }
+
+    switch (current_cmd.mode)
+    {
+      case RGB_MODE_OFF:
+        BSP_RGB_Set(0, 0, 0, 0);
+        BSP_RGB_Show();
+        osDelay(100);
+        break;
+
+      case RGB_MODE_STATIC:
+        // 常亮模式使用指令指定的原始亮度
+        BSP_RGB_Set(0, current_cmd.R, current_cmd.G, current_cmd.B);
+        BSP_RGB_Show();
+        osDelay(100);
+        break;
+
+      case RGB_MODE_BREATHING:
+        // --- 呼吸算法 ---
+        breath_val += breath_dir;
+
+        // 1. 到达最大亮度 (30)：反转方向，开始变暗
+        if (breath_val >= RGB_BREATH_MAX_BRIGHTNESS) {
+            breath_val = RGB_BREATH_MAX_BRIGHTNESS;
+            breath_dir = -RGB_BREATH_STEP;
+        }
+        // 2. 到达熄灭状态 (0)：反转方向，开始变亮
+        else if (breath_val <= 0) {
+            breath_val = 0;
+            breath_dir = RGB_BREATH_STEP;
+        }
+
+        // --- 颜色缩放计算 ---
+        // 核心逻辑：TargetColor * (当前呼吸等级 / 255)
+        // 例如：G=255, breath_val=30 -> 255 * 30 / 255 = 30 (实际输出亮度)
+        // 例如：G=255, breath_val=15 -> 255 * 15 / 255 = 15 (半亮)
+        uint8_t r = (uint16_t)current_cmd.R * breath_val / 255;
+        uint8_t g = (uint16_t)current_cmd.G * breath_val / 255;
+        uint8_t b = (uint16_t)current_cmd.B * breath_val / 255;
+
+        BSP_RGB_Set(0, r, g, b);
+        BSP_RGB_Show();
+
+        // 延时 40ms，控制呼吸速度
+        osDelay(RGB_BREATH_REFRESH_MS);
+        break;
+
+      case RGB_MODE_BLINK:
+        // --- 闪烁算法 (保持全亮度) ---
+        // 报警时我们希望它越亮越好，所以这里不进行缩放，直接用原值
+        if (blink_state == 0) {
+            // 亮 (使用指令中的原始颜色，通常是 255,0,0)
+            BSP_RGB_Set(0, current_cmd.R, current_cmd.G, current_cmd.B);
+            blink_state = 1;
+        } else {
+            // 灭
+            BSP_RGB_Set(0, 0, 0, 0);
+            blink_state = 0;
+        }
+        BSP_RGB_Show();
+
+        // 延时 100ms，快速闪烁
+        osDelay(RGB_BLINK_PERIOD_MS);
+        break;
+
+      default:
+        osDelay(100);
+        break;
+    }
+  }
+  /* USER CODE END StartRGBTask */
 }
 
 /* Private application code --------------------------------------------------*/
