@@ -31,6 +31,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "bsp_bt.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -176,16 +177,29 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-int __io_putchar(int ch) {
-  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
-  return ch;
-}
+//int __io_putchar(int ch) {
+//  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+//  return ch;
+//}
 
-// 可选：重定向scanf
-int __io_getchar(void) {
-  uint8_t ch = 0;
-  HAL_UART_Receive(&huart2, &ch, 1, HAL_MAX_DELAY);
-  return ch;
+//// 可选：重定向scanf
+//int __io_getchar(void) {
+//  uint8_t ch = 0;
+//  HAL_UART_Receive(&huart2, &ch, 1, HAL_MAX_DELAY);
+//  return ch;
+//}
+
+uint8_t ch;
+uint8_t ch_r;
+int fputc(int c, FILE * f)//重写这个函数，重定向printf函数到串口
+{
+ch=c;
+HAL_UART_Transmit(&huart2,&ch,1,HAL_MAX_DELAY);//发送串口 return c;
+}
+int fgetc(FILE * F)//重定向scanf函数到串口意思就是说接受串口发过来的数据
+{
+HAL_UART_Receive (&huart2,&ch_r,1,HAL_MAX_DELAY);//接收_
+return ch_r;
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
