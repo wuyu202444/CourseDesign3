@@ -38,6 +38,7 @@
 #include "bsp_rgb.h"
 #include "bsp_key.h"
 #include "bsp_bt.h"
+#include "bsp_flash_crc.h"
 
 #include "app_types.h"
 /* USER CODE END Includes */
@@ -86,6 +87,8 @@
 SensorData_t g_LatestSensorData = {0};
 // [新增] 显示模式: 0=详细模式(默认), 1=大字体模式
 volatile uint8_t g_DisplayPage = 0;
+// >>>>> [新增] 全局报警阈值 (供显示任务读取) <<<<<
+volatile float g_AlarmThreshold = 30.0f;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -397,6 +400,26 @@ void StartLogicTask(void *argument)
   // [新增] 记录上一次的报警状态，用于检测状态跳变
   bool last_alarm_status = false;
 
+  // [新增] 系统设置管理
+  SystemSettings_t sys_settings;
+
+  // 1. 初始化 CRC (如果 CubeMX 未初始化)
+  // BSP_CRC_Init();
+
+  // 2. 读取 Flash 中的设置
+  printf("[Logic] Reading Settings from Flash...\r\n");
+  if (BSP_Settings_Read(&sys_settings) == 0) {
+    printf("[Logic] Read OK. Threshold: %.1f C\r\n", sys_settings.temp_threshold);
+  } else {
+    // 如果读取失败（第一次运行或校验错），加载默认值
+    printf("[Logic] Read Fail/Empty. Load Default.\r\n");
+    sys_settings.temp_threshold = 30.0f; // 默认报警温度
+    BSP_Settings_Save(&sys_settings);    // 保存初始值
+  }
+
+  // [关键] 初始化后，同步到全局变量
+  g_AlarmThreshold = sys_settings.temp_threshold;
+
   // 上电默认发送一次“绿色呼吸”
   BSP_RGB_SendCmd(RGB_MODE_BREATHING, 0, 255, 0, 0);
 
@@ -425,6 +448,31 @@ void StartLogicTask(void *argument)
             g_DisplayPage = 0; // 循环切换：0 -> 1 -> 0
           }
         }
+      // [新增] KEY2: 减少阈值
+        else if (key_event == KEY_2)
+        {
+          sys_settings.temp_threshold -= 1.0f;
+          // [关键] 同步更新全局变量
+          g_AlarmThreshold = sys_settings.temp_threshold;
+          printf("[Logic] Key2 -> Thres -1. New: %.1f\r\n", sys_settings.temp_threshold);
+
+          // 保存到 Flash (注意: 频繁写 Flash 会影响寿命，这里演示简单逻辑直接写)
+          if(BSP_Settings_Save(&sys_settings) == 0) {
+            printf("[Logic] Saved to Flash OK\r\n");
+          }
+        }
+      // [新增] KEY3: 增加阈值
+        else if (key_event == KEY_3)
+        {
+          sys_settings.temp_threshold += 1.0f;
+          // [关键] 同步更新全局变量
+          g_AlarmThreshold = sys_settings.temp_threshold;
+          printf("[Logic] Key3 -> Thres +1. New: %.1f\r\n", sys_settings.temp_threshold);
+
+          if(BSP_Settings_Save(&sys_settings) == 0) {
+            printf("[Logic] Saved to Flash OK\r\n");
+          }
+        }
     }
 
     // ==========================================
@@ -433,7 +481,8 @@ void StartLogicTask(void *argument)
     // 判断是否有任意一项异常
     // 温度 > 30.0 或 电压 > 2.5V (ADC > 3103) - 根据您的代码调整阈值
     // 这里为了演示，假设阈值是 30度 和 1861(约1.5V，参考您原代码)
-    bool temp_high = (g_LatestSensorData.temp_celsius > 35.0f);
+    // [修改] 使用 sys_settings.temp_threshold 变量替代硬编码的 35.0f
+    bool temp_high = (g_LatestSensorData.temp_celsius > sys_settings.temp_threshold);
     bool volt_high = (g_LatestSensorData.adc_raw > 1861);
 
     alarm_condition = temp_high | volt_high;
@@ -555,8 +604,12 @@ void StartDisplayTask(void *argument)
 
         OLED_ShowString(0, 32, (uint8_t *)str_buf, 16, 1);
 
-        // 状态栏
-        OLED_ShowString(0, 48, "Mode: Detail", 12, 1);
+        // ==============================================
+        // [修改] 状态栏显示：Set: 阈值
+        // ==============================================
+        // 格式化字符串，显示 "Set: 30.0 C"
+        sprintf(str_buf, "Set: %.1f C   ", g_AlarmThreshold);
+        OLED_ShowString(0, 48, (uint8_t *)str_buf, 12, 1);
       }
       else
       {
@@ -569,8 +622,8 @@ void StartDisplayTask(void *argument)
         sprintf(str_buf, "%.1f C", recv_data.temp_celsius);
         OLED_ShowString(32, 18, (uint8_t *)str_buf, 24, 1); // 居中一点
 
-        // 底部提示按键功能
-        OLED_ShowString(0, 48, "K1:Switch View", 12, 1);
+        sprintf(str_buf, "Set: %.1f C   ", g_AlarmThreshold);
+        OLED_ShowString(0, 48, (uint8_t *)str_buf, 12, 1);
       }
     }
 

@@ -20,6 +20,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "adc.h"
+#include "crc.h"
 #include "dma.h"
 #include "i2c.h"
 #include "iwdg.h"
@@ -103,6 +104,7 @@ int main(void)
   MX_TIM4_Init();
   MX_TIM1_Init();
   MX_USART6_UART_Init();
+  MX_CRC_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */
