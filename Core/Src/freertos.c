@@ -25,10 +25,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "iwdg.h"
+/* --- Standard Libraries --- */
 #include "stdio.h"
-#include <stdbool.h> // 使用 bool 类型
+#include <stdbool.h>
 
+/* --- Hardware Drivers (BSP) --- */
+#include "iwdg.h"
 #include "bsp_oled.h"
 #include "bsp_seg.h"
 #include "bsp_lm75.h"
@@ -40,6 +42,7 @@
 #include "bsp_bt.h"
 #include "bsp_flash_crc.h"
 
+/* --- Application Types --- */
 #include "app_types.h"
 /* USER CODE END Includes */
 
@@ -50,28 +53,22 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* --- 报警标志位定义 --- */
 #define ALARM_TEMP_HIGH   (1 << 0)  // 温度过高
 #define ALARM_VOLT_HIGH   (1 << 1)  // 电压过高
 
-
-// ================= RGB 呼吸灯配置 =================
-
-// 1. 最大亮度 (0-255)
-// 如果觉得 LED 太刺眼，可以把这个改小，比如 100
+/* --- RGB 呼吸灯参数配置 --- */
+// 1. 最大亮度 (0-255): 降低此值可避免太刺眼
 #define RGB_BREATH_MAX_BRIGHTNESS  30
 
-// 2. 呼吸步长 (每次增加的数值)
-// 数值越大，呼吸越急促；数值越小，呼吸越平缓
+// 2. 呼吸步长: 越大呼吸越急促
 #define RGB_BREATH_STEP            1
 
-// 3. 呼吸刷新周期 (ms)
-// 决定动画的流畅度，建议 20-50ms
+// 3. 呼吸刷新周期 (ms): 建议 20-50ms，保证动画流畅
 #define RGB_BREATH_REFRESH_MS      40
 
-// ================= RGB 报警闪烁配置 =================
-
-// 4. 报警闪烁周期 (ms)
-// 100ms 代表 100ms亮 -> 100ms灭 (即 5Hz 闪烁)
+/* --- RGB 报警闪烁配置 --- */
+// 4. 闪烁周期 (ms): 100ms亮 -> 100ms灭 (5Hz)
 #define RGB_BLINK_PERIOD_MS        100
 /* USER CODE END PD */
 
@@ -82,12 +79,15 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-// 全局传感器数据副本 (公告板)
-// SensorTask 写，LogicTask 读
+/* --- 全局共享数据 (公告板) --- */
+// SensorTask 负责写，LogicTask/DisplayTask 负责读
 SensorData_t g_LatestSensorData = {0};
-// [新增] 显示模式: 0=详细模式(默认), 1=大字体模式
+
+/* --- 全局控制标志 --- */
+// 显示模式: 0=详细模式(默认), 1=大字体模式
 volatile uint8_t g_DisplayPage = 0;
-// >>>>> [新增] 全局报警阈值 (供显示任务读取) <<<<<
+
+// 报警温度阈值 (LogicTask更新, DisplayTask读取)
 volatile float g_AlarmThreshold = 30.0f;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
@@ -275,37 +275,45 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  /* --- 1. 系统基础初始化 --- */
   OLED_Init();
   OLED_Clear();
   OLED_Refresh();
 
   printf("System Starting...\r\n");
 
-  // 1. 初始化传感器
-  // 1.1 LM75 (I2C)
+  /* --- 2. 传感器初始化 --- */
+  // 2.1 LM75 (I2C)
   if (BSP_LM75_Init() == 0) {
     printf("[OK] LM75 Init\r\n");
   } else {
     printf("[ERR] LM75 Init Failed\r\n");
   }
-  // 1.2 ADC (DMA)
+
+  // 2.2 ADC (DMA)
   BSP_ADC_Init();
   printf("[OK] ADC DMA Started\r\n");
-  // [新增] 初始化频率测量
+
+  // 2.3 频率测量 (IC)
   BSP_Freq_Init();
   printf("[OK] TIM4 Freq Input Capture Started\r\n");
-  //
+
+  /* --- 3. 外设初始化 --- */
   BSP_RGB_Init();
   printf("[OK] RGB Init\r\n");
 
   printf("System Startup Success!\r\n");
 
-  /* Infinite loop */
+  /* --- 4. 心跳循环 --- */
   for(;;)
   {
     static uint32_t count = 0;
+
+    // 数码管扫描 (如果是动态扫描，需要高频调用)
     BSP_LEDSEG_ShowNum(1, 2);
-    if (count == 200)
+
+    // 心跳灯 LED3
+    if (count == 200) // 约 1000ms 翻转一次 (5ms * 200)
     {
       HAL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
       count = 0;
@@ -326,57 +334,38 @@ void StartDefaultTask(void *argument)
 void StartSensorTask(void *argument)
 {
   /* USER CODE BEGIN StartSensorTask */
-
-  // 局部变量定义
   SensorData_t current_data;
-  osStatus_t status;
 
-  // 任务循环
+  /* Infinite loop */
   for(;;)
   {
-    // ===========================
-    // 1. 获取数据 (Acquire)
-    // ===========================
+    /* --- 1. 获取数据 (Acquire) --- */
 
-    // 读取 LM75 (建议加上互斥锁，虽然目前单任务访问不出错，但习惯要好)
-    osMutexAcquire(m_I2CHandle, osWaitForever); // [可选优化]
+    // LM75: 使用互斥锁保护 I2C 总线
+    osMutexAcquire(m_I2CHandle, osWaitForever);
     current_data.temp_celsius = BSP_LM75_ReadTemp();
-    osMutexRelease(m_I2CHandle);                // [可选优化]
+    osMutexRelease(m_I2CHandle);
 
-    // 读取 ADC
+    // ADC: 读取光敏/电位器数据
     current_data.adc_raw = BSP_ADC_GetRaw();
 
-    // 读取频率 [修改此处]
+    // Freq: 读取 555 频率
     current_data.freq_hz = BSP_Freq_Get();
 
-    // >>>>> [新增] 更新全局副本，供 LogicTask 使用 <<<<<
+    /* --- 2. 更新全局副本 (Publish) --- */
+    // 供 LogicTask 或 BluetoothTask 随时读取最新状态
     g_LatestSensorData = current_data;
-    // >>>>> [结束] <<<<<
 
-    // ===========================
-    // 2. 发送队列 (Queue Send)
-    // ===========================
+    /* --- 3. 发送数据队列 (Send Queue) --- */
+    // 将数据发送给 DisplayTask 进行显示 (非阻塞)
+    osMessageQueuePut(q_SensorDataHandle, &current_data, 0, 0);
 
-    // 将结构体发送到队列 q_SensorData
-    // 参数说明: 句柄, 数据指针, 优先级(0), 超时时间(0 - 不等待)
-    status = osMessageQueuePut(q_SensorDataHandle, &current_data, 0, 0);
+    /* --- 4. 调试输出 (Optional) --- */
+    // printf("[Sensor] T:%.1f, ADC:%d, F:%lu\r\n",
+    //        current_data.temp_celsius, current_data.adc_raw, current_data.freq_hz);
 
-    // ===========================
-    // 3. 调试打印 (Debug Print)
-    // ===========================
-
-    // 调试打印 (更新一下格式，把频率也打出来)
-    // printf("[Sensor] T:%.1f C, ADC:%d, Freq:%lu Hz\r\n",
-    //        current_data.temp_celsius,
-    //        current_data.adc_raw,
-    //        current_data.freq_hz);
-
-    // ===========================
-    // 4. 任务调度 (Delay)
-    // ===========================
-
-    // 延时 200ms，控制采样率，释放 CPU 给 DisplayTask 和其他任务
-    osDelay(1000);
+    /* --- 5. 采样周期控制 --- */
+    osDelay(1000); // 1Hz 采样率
   }
   /* USER CODE END StartSensorTask */
 }
@@ -391,165 +380,114 @@ void StartSensorTask(void *argument)
 void StartLogicTask(void *argument)
 {
   /* USER CODE BEGIN StartLogicTask */
-
-  // 局部变量
   uint16_t key_event = 0;
-  bool is_muted = false;       // 静音标志位
-  bool alarm_condition = false; // 报警条件汇总
+  bool is_muted = false;        // 静音标志位
+  bool alarm_condition = false; // 报警总状态
+  bool last_alarm_status = false; // 历史状态用于检测边沿
 
-  // [新增] 记录上一次的报警状态，用于检测状态跳变
-  bool last_alarm_status = false;
-
-  // [新增] 系统设置管理
   SystemSettings_t sys_settings;
 
-  // 1. 初始化 CRC (如果 CubeMX 未初始化)
-  // BSP_CRC_Init();
-
-  // 2. 读取 Flash 中的设置
-  printf("[Logic] Reading Settings from Flash...\r\n");
+  /* --- 1. 读取 Flash 配置 --- */
+  printf("[Logic] Reading Settings...\r\n");
   if (BSP_Settings_Read(&sys_settings) == 0) {
     printf("[Logic] Read OK. Threshold: %.1f C\r\n", sys_settings.temp_threshold);
   } else {
-    // 如果读取失败（第一次运行或校验错），加载默认值
-    printf("[Logic] Read Fail/Empty. Load Default.\r\n");
-    sys_settings.temp_threshold = 30.0f; // 默认报警温度
-    BSP_Settings_Save(&sys_settings);    // 保存初始值
+    printf("[Logic] Read Fail. Loading Defaults.\r\n");
+    sys_settings.temp_threshold = 30.0f;
+    BSP_Settings_Save(&sys_settings);
   }
-
-  // [关键] 初始化后，同步到全局变量
+  // 同步全局阈值
   g_AlarmThreshold = sys_settings.temp_threshold;
 
-  // 上电默认发送一次“绿色呼吸”
-  BSP_RGB_SendCmd(RGB_MODE_BREATHING, 0, 255, 0, 0);
+  // 上电默认效果
+  BSP_RGB_SendCmd(RGB_MODE_BREATHING, 0, 255, 0, 0); // 绿色呼吸
 
   /* Infinite loop */
   for(;;)
   {
-    // ==========================================
-    // 1. 处理按键事件 (从队列接收)
-    // ==========================================
-    // 使用 0 等待时间，非阻塞查询。如果有按键按下，处理它。
+    /* ==========================================
+     * 1. 处理按键事件 (Event Processing)
+     * ========================================== */
     if (osMessageQueueGet(q_KeyEvtHandle, &key_event, NULL, 0) == osOK)
     {
-        if (key_event == KEY_0)
+        switch (key_event)
         {
-            printf("[Logic] Key0 Pressed -> Mute Alarm\r\n");
-            is_muted = true; // 激活静音
-        }
-      // [新增] KEY1 切换界面
-        else if (key_event == KEY_1)
-        {
-          OLED_Clear();
-          OLED_Refresh();
-          printf("[Logic] Key1 Pressed -> Switch Page\r\n");
-          g_DisplayPage++;
-          if (g_DisplayPage > 1) {
-            g_DisplayPage = 0; // 循环切换：0 -> 1 -> 0
-          }
-        }
-      // [新增] KEY2: 减少阈值
-        else if (key_event == KEY_2)
-        {
-          sys_settings.temp_threshold -= 1.0f;
-          // [关键] 同步更新全局变量
-          g_AlarmThreshold = sys_settings.temp_threshold;
-          printf("[Logic] Key2 -> Thres -1. New: %.1f\r\n", sys_settings.temp_threshold);
+          case KEY_0: // 消音
+            printf("[Logic] Key0 -> Mute Alarm\r\n");
+            is_muted = true;
+            break;
 
-          // 保存到 Flash (注意: 频繁写 Flash 会影响寿命，这里演示简单逻辑直接写)
-          if(BSP_Settings_Save(&sys_settings) == 0) {
-            printf("[Logic] Saved to Flash OK\r\n");
-          }
-        }
-      // [新增] KEY3: 增加阈值
-        else if (key_event == KEY_3)
-        {
-          sys_settings.temp_threshold += 1.0f;
-          // [关键] 同步更新全局变量
-          g_AlarmThreshold = sys_settings.temp_threshold;
-          printf("[Logic] Key3 -> Thres +1. New: %.1f\r\n", sys_settings.temp_threshold);
+          case KEY_1: // 切换界面
+            printf("[Logic] Key1 -> Switch Page\r\n");
+            g_DisplayPage = (g_DisplayPage + 1) % 2; // 0->1->0 循环
+            // 切换时刷新一次屏幕防止残影 (可选，交给 DisplayTask 亦可)
+            OLED_Clear();
+            OLED_Refresh();
+            break;
 
-          if(BSP_Settings_Save(&sys_settings) == 0) {
-            printf("[Logic] Saved to Flash OK\r\n");
-          }
+          case KEY_2: // 阈值 -1
+            sys_settings.temp_threshold -= 1.0f;
+            g_AlarmThreshold = sys_settings.temp_threshold;
+            printf("[Logic] Key2 -> Thres -1: %.1f\r\n", sys_settings.temp_threshold);
+            BSP_Settings_Save(&sys_settings);
+            break;
+
+          case KEY_3: // 阈值 +1
+            sys_settings.temp_threshold += 1.0f;
+            g_AlarmThreshold = sys_settings.temp_threshold;
+            printf("[Logic] Key3 -> Thres +1: %.1f\r\n", sys_settings.temp_threshold);
+            BSP_Settings_Save(&sys_settings);
+            break;
         }
     }
 
-    // ==========================================
-    // 2. 检查报警条件
-    // ==========================================
-    // 判断是否有任意一项异常
-    // 温度 > 30.0 或 电压 > 2.5V (ADC > 3103) - 根据您的代码调整阈值
-    // 这里为了演示，假设阈值是 30度 和 1861(约1.5V，参考您原代码)
-    // [修改] 使用 sys_settings.temp_threshold 变量替代硬编码的 35.0f
+    /* ==========================================
+     * 2. 检查报警条件 (Alarm Check)
+     * ========================================== */
     bool temp_high = (g_LatestSensorData.temp_celsius > sys_settings.temp_threshold);
-    bool volt_high = (g_LatestSensorData.adc_raw > 1861);
+    bool volt_high = (g_LatestSensorData.adc_raw > 1861); // > ~1.5V
 
     alarm_condition = temp_high | volt_high;
 
-    // ==========================================
-    // [新增] RGB 状态机控制逻辑
-    // ==========================================
-
-    // 只有当状态发生改变时 (Edge Detection)，才发送队列指令
-    // 这样避免每 100ms 都塞满队列
+    /* ==========================================
+     * 3. RGB 状态机控制 (State Machine)
+     * ========================================== */
+    // 仅在状态跳变时发送指令，避免堵塞队列
     if (alarm_condition != last_alarm_status)
     {
-      if (alarm_condition == true)
-      {
-        // --- 状态变更为：报警 ---
-        // 发送红色 (255, 0, 0) 闪烁
-        printf("[Logic] Alarm! RGB -> Red Blink\r\n");
+      if (alarm_condition) {
+        printf("[Logic] ALARM! RGB -> Red Blink\r\n");
         BSP_RGB_SendCmd(RGB_MODE_BLINK, 30, 0, 0, 0);
-      }
-      else
-      {
-        // --- 状态变更为：正常 ---
-        // 发送绿色 (0, 255, 0) 呼吸
+      } else {
         printf("[Logic] Normal. RGB -> Green Breath\r\n");
         BSP_RGB_SendCmd(RGB_MODE_BREATHING, 0, 255, 0, 0);
       }
-
-      // 更新历史状态
       last_alarm_status = alarm_condition;
     }
 
+    /* ==========================================
+     * 4. 蜂鸣器控制 (Buzzer Control)
+     * ========================================== */
     if (alarm_condition)
     {
-        // === 有异常发生 ===
-
-        if (is_muted)
-        {
-            // 如果处于静音状态，强制清除所有报警标志
-            // 这样 AlarmTask 就会检测到无标志，从而关闭蜂鸣器
+        if (is_muted) {
+            // 静音状态：清除标志，停止蜂鸣器
             osEventFlagsClear(evt_AlarmHandle, ALARM_TEMP_HIGH | ALARM_VOLT_HIGH);
-        }
-        else
-        {
-            // 如果未静音，根据具体原因设置标志位
+        } else {
+            // 设置对应的报警标志，触发 AlarmTask
             if (temp_high) osEventFlagsSet(evt_AlarmHandle, ALARM_TEMP_HIGH);
             if (volt_high) osEventFlagsSet(evt_AlarmHandle, ALARM_VOLT_HIGH);
         }
     }
     else
     {
-        // === 一切正常 ===
-
-        // 1. 清除报警标志 (停止蜂鸣器)
+        // 恢复正常：清除所有标志
         osEventFlagsClear(evt_AlarmHandle, ALARM_TEMP_HIGH | ALARM_VOLT_HIGH);
-
-        // 2. 复位静音状态
-        // 只有当环境恢复正常后，才取消静音。
-        // 这样下次再变异常时，蜂鸣器会再次响起。
-        if (is_muted)
-        {
-            is_muted = false;
-            printf("[Logic] Condition Normal -> Mute Reset\r\n");
-        }
+        // 如果之前静音了，恢复正常后取消静音，以便下次报警能响
+        if (is_muted) is_muted = false;
     }
 
-    // 逻辑处理周期 (100ms)
-    osDelay(100);
+    osDelay(100); // 逻辑处理周期
   }
   /* USER CODE END StartLogicTask */
 }
@@ -565,70 +503,52 @@ void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
   SensorData_t recv_data;
-  osStatus_t status;
   char str_buf[32];
 
   /* Infinite loop */
   for(;;)
   {
-    // 1. 获取数据
-    status = osMessageQueueGet(q_SensorDataHandle, &recv_data, NULL, 0);
-
-    // 如果没有新数据，可以使用全局缓存 g_LatestSensorData 来刷新界面（防止切换界面时闪烁）
-    // 但为了简单，这里假设数据更新够快。
-
-    if (status == osOK)
+    // 等待数据更新
+    if (osMessageQueueGet(q_SensorDataHandle, &recv_data, NULL, 0) == osOK)
     {
-      // [关键修改] 每次刷新前建议清空缓存，或者确保覆盖了旧内容
-      // OLED_Clear(); // 如果您的驱动是全屏刷新模式，可以在这里 clear
-
       if (g_DisplayPage == 0)
       {
-        // === 界面 0: 详细数据模式 (Temp + Volt + Freq) ===
+        /* --- Page 0: 详细模式 --- */
 
-        // 1. 温度
+        // 1. Temp
         sprintf(str_buf, "T: %.1f C   ", recv_data.temp_celsius);
         OLED_ShowString(0, 0, (uint8_t *)str_buf, 16, 1);
 
-        // 2. 电压
+        // 2. Voltage (Conversion: Raw * 3.3 / 4095)
         float voltage = recv_data.adc_raw * 3.3f / 4095.0f;
         sprintf(str_buf, "V: %.2f V   ", voltage);
         OLED_ShowString(0, 16, (uint8_t *)str_buf, 16, 1);
 
-        // 3. [新增] 频率
-        // 如果频率很大，可以使用 %.1f kHz
+        // 3. Frequency (Auto unit kHZ/Hz)
         if(recv_data.freq_hz < 10000)
           sprintf(str_buf, "F: %lu Hz   ", recv_data.freq_hz);
         else
           sprintf(str_buf, "F: %.1f kHz ", recv_data.freq_hz / 1000.0f);
-
         OLED_ShowString(0, 32, (uint8_t *)str_buf, 16, 1);
-
-        // ==============================================
-        // [修改] 状态栏显示：Set: 阈值
-        // ==============================================
-        // 格式化字符串，显示 "Set: 30.0 C"
-        sprintf(str_buf, "Set: %.1f C   ", g_AlarmThreshold);
-        OLED_ShowString(0, 48, (uint8_t *)str_buf, 12, 1);
       }
       else
       {
-        // === 界面 1: 极简模式 (大字体温度) ===
-        // 假设您没有移植大字体库，这里用普通字体模拟或仅显示核心信息
-
+        /* --- Page 1: 简略模式 --- */
         OLED_ShowString(18, 0, "Temp Monitor", 16, 1);
 
-        // 显示大一点的数值 (如果有 24号字体可以用 24)
+        // 大字体温度显示
         sprintf(str_buf, "%.1f C", recv_data.temp_celsius);
-        OLED_ShowString(32, 18, (uint8_t *)str_buf, 24, 1); // 居中一点
-
-        sprintf(str_buf, "Set: %.1f C   ", g_AlarmThreshold);
-        OLED_ShowString(0, 48, (uint8_t *)str_buf, 12, 1);
+        OLED_ShowString(32, 18, (uint8_t *)str_buf, 24, 1);
       }
+
+      /* --- 状态栏 (Common) --- */
+      sprintf(str_buf, "Set: %.1f C   ", g_AlarmThreshold);
+      OLED_ShowString(0, 48, (uint8_t *)str_buf, 12, 1);
+
+      OLED_Refresh();
     }
 
-    OLED_Refresh();
-    osDelay(100); // 刷新率 10Hz
+    osDelay(100); // 刷新率限制
   }
   /* USER CODE END StartDisplayTask */
 }
@@ -643,7 +563,6 @@ void StartDisplayTask(void *argument)
 void StartAlarmTask(void *argument)
 {
   /* USER CODE BEGIN StartAlarmTask */
-
   uint32_t flags;
 
   BSP_Buzzer_Off();
@@ -651,42 +570,34 @@ void StartAlarmTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    // 1. 等待报警事件
-    // 如果无报警，这里会阻塞等待 100ms
-    // 如果有报警，这里会立即返回
+    // 等待报警事件标志 (阻塞等待)
     flags = osEventFlagsWait(evt_AlarmHandle,
                              ALARM_TEMP_HIGH | ALARM_VOLT_HIGH,
-                             osFlagsWaitAny | osFlagsNoClear,
+                             osFlagsWaitAny | osFlagsNoClear, // 不自动清除，由 LogicTask 清除
                              100);
 
+    // 检查是否有有效标志
     if (flags > 0 && flags != osFlagsErrorTimeout)
     {
-      // === 报警状态 (必须包含 osDelay) ===
+      /* === 报警鸣叫逻辑 === */
 
-      // 阶段 1: 响
+      // 1. 开始鸣叫 (Sound On)
       if (flags & ALARM_TEMP_HIGH) {
-        BSP_Buzzer_SetTone(2000, 2); // 高温：高频，大声
+        BSP_Buzzer_SetTone(2000, 2); // 高温: 急促高音
       } else {
-        BSP_Buzzer_SetTone(1000, 1);  // 电压：低频，小声
+        BSP_Buzzer_SetTone(1000, 1); // 电压: 低沉声音
       }
-
-      // 【关键点】: 延时 100ms
-      // 这段时间 AlarmTask 进入阻塞态，CPU 交给 LogicTask 和 DisplayTask
       osDelay(100);
 
-      // 阶段 2: 停 (制造滴-滴-滴的效果)
+      // 2. 停止鸣叫 (Sound Off) - 制造滴滴声
       BSP_Buzzer_Off();
-
-      // 【关键点】: 再次延时 100ms
-      // 调节这个时间和上面的时间，可以改变报警的节奏 (急促或缓慢)
       osDelay(100);
     }
     else
     {
-      // === 无报警状态 ===
+      /* === 无报警 === */
       BSP_Buzzer_Off();
-      // 这里不需要额外的 delay，因为开头的 osEventFlagsWait 带了 100ms 超时
-      // 当没有标志位时，它自动就是阻塞的
+      // 此处利用 osEventFlagsWait 的超时机制自动循环，无需额外 Delay
     }
   }
   /* USER CODE END StartAlarmTask */
@@ -705,6 +616,7 @@ void StartKeepAlive(void *argument)
   /* Infinite loop */
   for(;;)
   {
+    // 喂狗
     HAL_IWDG_Refresh(&hiwdg);
     osDelay(1000);
   }
@@ -721,43 +633,35 @@ void StartKeepAlive(void *argument)
 void StartRGBTask(void *argument)
 {
   /* USER CODE BEGIN StartRGBTask */
-
   BSP_RGB_Init();
 
-  // 默认状态变量
-  RGBCmd_t current_cmd = {0};
+  // 当前执行的指令
+  RGBCmd_t current_cmd = { .mode = RGB_MODE_BREATHING, .G = 255 };
 
-  // 初始默认：绿色呼吸
-  current_cmd.mode = RGB_MODE_BREATHING;
-  current_cmd.R = 0;
-  current_cmd.G = 255; // 这里设置255，实际显示亮度会由呼吸算法缩放到 0~30
-  current_cmd.B = 0;
-
-  // 动画控制变量
-  int16_t breath_val = 0;
-  // 初始化步长方向
-  int8_t  breath_dir = RGB_BREATH_STEP;
-  uint8_t blink_state = 0;
+  // 动画状态变量
+  int16_t breath_val = 0;              // 当前呼吸亮度级
+  int8_t  breath_dir = RGB_BREATH_STEP; // 呼吸方向 (+1/-1)
+  uint8_t blink_state = 0;             // 闪烁状态 (0/1)
 
   for(;;)
   {
     RGBCmd_t new_cmd;
 
-    // 尝试获取新指令 (0等待，非阻塞)
+    /* --- 1. 接收新指令 --- */
     if (osMessageQueueGet(q_RGBCmdHandle, &new_cmd, NULL, 0) == osOK)
     {
        current_cmd = new_cmd;
-
-       // 重置动画状态，确保切换顺滑
+       // 重置动画状态，确保切换平滑
        breath_val = 0;
        blink_state = 0;
-       breath_dir = RGB_BREATH_STEP; // 重置为变亮方向
+       breath_dir = RGB_BREATH_STEP;
 
-       // 切换瞬间先灭灯，清除残影
+       // 切换瞬间清空一次
        BSP_RGB_Set(0, 0, 0, 0);
        BSP_RGB_Show();
     }
 
+    /* --- 2. 执行模式逻辑 --- */
     switch (current_cmd.mode)
     {
       case RGB_MODE_OFF:
@@ -767,57 +671,45 @@ void StartRGBTask(void *argument)
         break;
 
       case RGB_MODE_STATIC:
-        // 常亮模式使用指令指定的原始亮度
         BSP_RGB_Set(0, current_cmd.R, current_cmd.G, current_cmd.B);
         BSP_RGB_Show();
         osDelay(100);
         break;
 
       case RGB_MODE_BREATHING:
-        // --- 呼吸算法 ---
+        /* --- 呼吸算法 --- */
         breath_val += breath_dir;
 
-        // 1. 到达最大亮度 (30)：反转方向，开始变暗
+        // 边界检查：反转方向
         if (breath_val >= RGB_BREATH_MAX_BRIGHTNESS) {
             breath_val = RGB_BREATH_MAX_BRIGHTNESS;
-            breath_dir = -RGB_BREATH_STEP;
-        }
-        // 2. 到达熄灭状态 (0)：反转方向，开始变亮
-        else if (breath_val <= 0) {
+            breath_dir = -RGB_BREATH_STEP; // 变暗
+        } else if (breath_val <= 0) {
             breath_val = 0;
-            breath_dir = RGB_BREATH_STEP;
+            breath_dir = RGB_BREATH_STEP;  // 变亮
         }
 
-        // --- 颜色缩放计算 ---
-        // 核心逻辑：TargetColor * (当前呼吸等级 / 255)
-        // 例如：G=255, breath_val=30 -> 255 * 30 / 255 = 30 (实际输出亮度)
-        // 例如：G=255, breath_val=15 -> 255 * 15 / 255 = 15 (半亮)
+        // 颜色缩放计算: 目标颜色 * (当前呼吸级 / 255)
+        // 注意：这里使用 uint16_t 避免乘法溢出
         uint8_t r = (uint16_t)current_cmd.R * breath_val / 255;
         uint8_t g = (uint16_t)current_cmd.G * breath_val / 255;
         uint8_t b = (uint16_t)current_cmd.B * breath_val / 255;
 
         BSP_RGB_Set(0, r, g, b);
         BSP_RGB_Show();
-
-        // 延时 40ms，控制呼吸速度
         osDelay(RGB_BREATH_REFRESH_MS);
         break;
 
       case RGB_MODE_BLINK:
-        // --- 闪烁算法 (保持全亮度) ---
-        // 报警时我们希望它越亮越好，所以这里不进行缩放，直接用原值
+        /* --- 闪烁算法 --- */
         if (blink_state == 0) {
-            // 亮 (使用指令中的原始颜色，通常是 255,0,0)
             BSP_RGB_Set(0, current_cmd.R, current_cmd.G, current_cmd.B);
             blink_state = 1;
         } else {
-            // 灭
             BSP_RGB_Set(0, 0, 0, 0);
             blink_state = 0;
         }
         BSP_RGB_Show();
-
-        // 延时 100ms，快速闪烁
         osDelay(RGB_BLINK_PERIOD_MS);
         break;
 
@@ -840,9 +732,11 @@ void StartBluetoothTask(void *argument)
 {
   /* USER CODE BEGIN StartBluetoothTask */
   BSP_BT_Init();
+
   /* Infinite loop */
   for(;;)
   {
+    // 处理蓝牙接收和发送数据 (传入全局 Sensor 数据指针)
     BSP_BT_ProcessTask(&g_LatestSensorData);
   }
   /* USER CODE END StartBluetoothTask */
@@ -852,4 +746,3 @@ void StartBluetoothTask(void *argument)
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-
